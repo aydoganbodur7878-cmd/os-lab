@@ -1,30 +1,46 @@
-# OS-29 - Verification
+# OS-24 Local .deb Installer - Verification
 
-## Project
-Server Log Viewer Helper
+## Environment
+- OS: Ubuntu Server 26.04.1 LTS
+- Shell: Bash
+- Project: os-lab
+- Task: OS-24 Local .deb Installer
 
-## Run Command
-```bash
-bash linux-lab/scripts/log-viewer.sh /var/log/syslog
-```
+## Purpose
+This script installs a local Debian (.deb) package on Ubuntu.
 
-## Features
-1. Display the first 20 log entries.
-2. Display the last 20 log entries.
-3. Follow log entries in real time.
-4. Count the total log lines.
-5. Exit the program.
+## Verification Plan
+1. Check Bash syntax.
+2. Test missing arguments.
+3. Test nonexistent package files.
+4. Test invalid .deb packages.
+5. Test installation preview and confirmation.
+6. Verify successful package installation.
 
-## Testing
-- Operating system: Ubuntu Linux
-- Bash syntax check: `bash -n linux-lab/scripts/log-viewer.sh`
-- Syntax check result: PASSED
+## Test Results
 
-## Expected Result
-The script displays an interactive menu. The user selects an option to view or count log entries. Press Ctrl+C to stop live log monitoring.
+### Test 1 - Bash Syntax
+Command: bash -n linux-lab/scripts/deb_install.sh
+Result: PASS - No syntax errors.
 
-Note: The specified log file must exist and be readable.
+### Test 2 - Missing Argument
+Command: bash linux-lab/scripts/deb_install.sh
+Result: PASS - Usage message displayed.
 
-## Student
-Aydoğan Bodur  
-Student Number: 2620511134
+### Test 3 - Missing Package File
+Command: bash linux-lab/scripts/deb_install.sh olmayan-paket.deb
+Result: PASS - Missing package was rejected.
+
+### Test 4 - Invalid Package
+Command: touch sahte.deb && bash linux-lab/scripts/deb_install.sh sahte.deb
+Result: PASS - Invalid package was rejected.
+
+### Test 5 - Real Package Installation
+Package: hello
+Command: bash linux-lab/scripts/deb_install.sh hello_*.deb
+Result: PASS - Package installation completed.
+
+### Test 6 - Installation Verification
+Command: dpkg -s hello | grep Status
+Output: Status: install ok installed
+Result: PASS - Package installation verified.
