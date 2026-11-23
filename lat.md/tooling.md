@@ -105,11 +105,35 @@ push; `OSLAB_SKIP_PREPUSH=1` skips it.
 Android and Source Lab have independent automated test suites.
 
 It lives in [[android-lab/lab/tests]] (analyzer, reporter, MobSF client, secret
-scanner, patcher, flow parser, agentic engine, web UI, the host engine in
-[[console/oslab.py]] and the [[tooling#Scope guard]]). Shell scripts across the
+scanner, patcher, flow parser, agentic engine, `frida-trace` call-map builder,
+web UI, the host engine in [[console/oslab.py]] and the [[tooling#Scope guard]]). Shell scripts across the
 VM labs are kept `bash -n` clean and use `set -euo pipefail`.
 The [[source-lab]] engine tests run in their own process from
 [[source-lab/engine]] so their imports cannot collide with Android tests.
+
+## Extension scanner
+
+Static risk scanner for unpacked browser extensions (roadmap task PENT-02).
+
+[[scripts/analysis/ext_scan]] reads an MV2/MV3 `manifest.json` (permissions, host access,
+content-script matches, CSP) and scans every script after blanking comments, folding
+concatenated strings and masking string contents, so `eval` in a comment is ignored while
+`self['ev'+'al']` is found. A file that both makes network requests and runs text as code is
+reported as a two-stage payload. The score is capability (max 40) plus behaviour (max 60).
+Its tests run as their own stage of [[scripts/run-tests.sh]].
+
+## Native messaging audit
+
+[[scripts/analysis/ext_native_host.py]] audits owned unpacked extensions and
+explicitly supplied native host manifests offline (PENT-18).
+
+A declared lab root bounds all reads; the tool never executes a host or accesses
+a browser, registry or network. It reports lexical API clues, browser-specific caller
+allowlists and local binary metadata/mode risks. Computed calls, effective
+privileges, signatures and Windows ACLs remain unverified. See
+[[scripts/analysis/README.md]] for limits, exit codes and the inert fixture builder
+[[scripts/analysis/make_native_host_lab.py]]. Its regression tests live in
+[[android-lab/lab/tests/test_ext_native_host.py]] and run with the normal suite.
 
 ## Firewall rule renderer
 
@@ -124,6 +148,11 @@ in nft, one tcp and one udp command in UFW), never all traffic. A port on `icmp`
 is ignored by both backends. Items that are not ports or ascending ranges in
 1–65535 (`esp`, `80,,443`, `500:400`) are skipped with a comment and a stderr
 warning. Notes and names are flattened to one line before they go into comments.
+
+A multi-site company keeps one rule set per branch and is rendered one site at a time with
+`--branch`. `siber-guvenlik-sirketi` declares four sites (`istanbul-hq`, `sivas-soc`,
+`ankara-academy`, `dubai-field`) in [[firewall-lab/companies/siber-guvenlik-sirketi/company.json]];
+each renders on its own to UFW, nftables or the table form.
 [[.github/workflows/firewall-lab.yml]] renders every branch of every company and
 checks the output with `nft -c` and `bash -n`, and rejects duplicate branch ids.
 
@@ -218,6 +247,22 @@ serves it read-only. The command line checks one target and exits 0 in scope,
 1 refused and 2 for a usage or manifest error, with `--json` for agents and
 scripts. The tests are in [[android-lab/lab/tests/test_scope_guard.py]].
 
+## Session scribe
+
+PENT-20 runner and CLI in [[scripts/session_scribe/cli.py]]: a scoped, logged pentest subagent session.
+
+The parts:
+[[scripts/session_scribe/scope_guard.py#ScopeGuard]] enforces [[scripts/session_scribe/scope.json]] CIDRs/domains/ports/commands,
+[[scripts/session_scribe/prompt_guard.py#PromptInjectionGuard]] blocks jailbreaks/exfil payloads,
+[[scripts/session_scribe/circuit_breaker.py#SubagentCircuitBreaker]] locks offenders until human-token reset,
+[[scripts/session_scribe/redactor.py#SecretRedactor]] masks secrets pre-log, and
+[[scripts/session_scribe/mitre_mapper.py#MitreMapper]] adds MITRE ATT&CK tags and compliance scores.
+[[scripts/session_scribe/subagent.py#PentestSubagent]] enforces [[scripts/session_scribe/subagent.py#AIDisclosure]] via
+[[scripts/session_scribe/audit_logger.py#AuditLogger]] / [[scripts/session_scribe/audit_logger.py#verify_log_chain]];
+[[scripts/session_scribe/forensic_exporter.py#ForensicExporter]] writes Merkle roots, SARIF v2.1.0 and `EVIDENCE_MANIFEST.json`, while
+[[scripts/session_scribe/report_signer.py#sign_report]] and [[scripts/session_scribe/html_dashboard.py#HTMLDashboard]] export signed reports and 4-tab HTML dashboards.
+Tests: [[scripts/session_scribe/tests/test_session_scribe.py]] · Report: [[scripts/session_scribe/REPORT.md]] · Video: https://youtu.be/VFLu1myMy_o.
+
 ## Community and contribution
 
 Contribution flow, coding conventions and the authorization stance.
@@ -245,3 +290,11 @@ do not distribute OS media; users are responsible for valid licences.
 [[dashboard/scripts/source-brain-model.test.mjs]] validates provider paths, graph
 limits/windows and bounded revision diff without a browser.
 [[source-lab/RUNBOOK.md]] records the portable release/rollback workflow.
+
+## Two-stage dropper detection harness
+
+[[scripts/analysis/dropper_detect.py]] and [[scripts/analysis/dropper_lab/README.md]]
+provide an offline static and loopback-rehearsal detector for two-stage "clean dropper"
+loaders (`PENT-15`), correlating remote stage fetch, deferred triggers, payload decoding
+and dynamic execution sinks while keeping benign utilities false-positive free.
+

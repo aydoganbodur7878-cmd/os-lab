@@ -61,6 +61,10 @@ try:
     import winapps  # noqa: E402  (console/winapps.py: read-only native Windows app mirror)
 except ImportError:
     winapps = None
+try:
+    import frida_inventory  # noqa: E402  (console/frida_inventory.py: read-only Frida device and process inventory)
+except ImportError:
+    frida_inventory = None
 ARTIFACTS_DIR = os.path.join(SCRIPT_DIR, "artifacts")
 SCRIPTS_DIR = os.path.join(SCRIPT_DIR, "scripts")
 
@@ -138,6 +142,7 @@ def read_web_file(name: str) -> bytes:
 ALLOWED_HOSTS = {"127.0.0.1", "localhost", "::1"}
 HOST_CACHE = {"at": 0.0, "value": None}
 HOST_LOCK = threading.Lock()
+FRIDA_TIMEOUT = 8
 CONTENT = (content_packs.ContentStore(content_packs.default_content_dir(), REPO_ROOT)
            if content_packs else None)
 APP = app_updates.AppUpdateStore() if app_updates else None
@@ -155,7 +160,62 @@ def cached_host():
         return HOST_CACHE["value"]
 
 
+class _CountingReader:
+    """Wraps the request stream and counts the bytes a handler really consumed."""
+
+    def __init__(self, raw):
+        self._raw = raw
+        self.count = 0
+
+    def read(self, size=-1):
+        data = self._raw.read(size)
+        self.count += len(data)
+        return data
+
+    def readline(self, size=-1):
+        data = self._raw.readline(size)
+        self.count += len(data)
+        return data
+
+    def __getattr__(self, name):
+        return getattr(self._raw, name)
+
+
 class LabHttpHandler(BaseHTTPRequestHandler):
+    def setup(self):
+        super().setup()
+        self.rfile = _CountingReader(self.rfile)
+
+    def parse_request(self):
+        # The request line and headers are read through the same stream: restart the count once
+        # they are parsed, so `count` is the body bytes a handler read and the drain sees what is left.
+        parsed = super().parse_request()
+        self.rfile.count = 0
+        return parsed
+
+    def _drain_request_body(self):
+        """Read what a handler left unread before the connection closes.
+
+        A request refused early (403, 413, 501...) never reads its body. Closing a socket that still
+        holds unread bytes makes the OS send a reset, and the client can see "connection reset"
+        instead of the refusal. Small bodies are discarded; anything declared larger than the cap
+        just closes the connection.
+        """
+        try:
+            declared = int(self.headers.get("Content-Length", 0) or 0)
+        except (TypeError, ValueError):
+            return
+        left = declared - getattr(self.rfile, "count", 0)
+        if left <= 0:
+            return
+        if left > 1_000_000:
+            self.close_connection = True
+            return
+        try:
+            self.rfile.read(left)
+        except OSError:
+            self.close_connection = True
+
     def log_message(self, fmt, *args):
         # Polling is frequent; keep the terminal for errors
         if not self.path.startswith(("/api/logs", "/api/jobs", "/api/health", "/api/host", "/api/labs/", "/api/capabilities", "/api/cleanup", "/api/web")):
@@ -201,6 +261,9 @@ class LabHttpHandler(BaseHTTPRequestHandler):
             return
         if path.startswith("/api/app/update"):
             self._app_get(path)
+            return
+        if path == "/api/frida/inventory":
+            self._frida_get(urllib.parse.parse_qs(parsed.query))
             return
         if path.startswith(("/api/host", "/api/labs", "/api/jobs", "/api/capabilities", "/api/scope")):
             if not oslab:
@@ -248,6 +311,18 @@ class LabHttpHandler(BaseHTTPRequestHandler):
             self._json(200, cleanup_api.CleanupAPI(REPO_ROOT).get(path, query))
         except cleanup_api.CleanupError as exc:
             self._json(exc.status, {"error": str(exc)})
+
+    def _frida_get(self, query: dict):
+        """Jobs view: the devices and processes Frida can attach to right now (PENT-09). Read-only."""
+        if frida_inventory is None:
+            self._json(501, {"error": "The Frida inventory (console/frida_inventory.py) is not installed"})
+            return
+        host = (query.get("host") or [""])[0].strip() or None
+        try:
+            # A short timeout: the card waits on this answer, and an absent target should fail fast.
+            self._json(200, frida_inventory.build_inventory(host=host, timeout=FRIDA_TIMEOUT))
+        except frida_inventory.ScopeError as exc:
+            self._json(400, {"error": str(exc)})
 
     def _cleanup_post(self, path: str):
         """Cleanup Lab: typed actions only (start a scan, plan or clean job, cancel one)."""
@@ -334,6 +409,12 @@ class LabHttpHandler(BaseHTTPRequestHandler):
             self._source_reply(400, {"error": "Invalid Source Lab request or unavailable private storage"})
 
     def do_DELETE(self):
+        try:
+            self._do_delete()
+        finally:
+            self._drain_request_body()
+
+    def _do_delete(self):
         if not self._host_ok():
             return
         if self.headers.get("X-OSLab") != "1":
@@ -493,6 +574,12 @@ class LabHttpHandler(BaseHTTPRequestHandler):
             self._json(404, {"error": "Not found"})
 
     def do_POST(self):
+        try:
+            self._do_post()
+        finally:
+            self._drain_request_body()
+
+    def _do_post(self):
         if not self._host_ok():
             return
         # Browsers cannot add a custom header cross-site without a CORS preflight, which this

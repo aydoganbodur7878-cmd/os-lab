@@ -129,7 +129,7 @@ def tools_for_host(os_name: str) -> list[tuple[str, str]]:
 
 
 LABCTL_ACTIONS = ["status", "doctor", "urls", "logs", "monitor", "start", "stop", "restart",
-                  "profile", "resize", "setup", "backup", "service-install", "service-uninstall"]
+                  "profile", "resize", "trace", "setup", "backup", "service-install", "service-uninstall"]
 # The iOS Lab's native path: simulator lifecycle plus optional Appium/idb device automation.
 MAC_ACTIONS = ["status", "doctor", "setup", "start", "stop", "appium-install", "appium-start", "appium-stop",
                "idb-install", "idb-start", "idb-stop", "xcuitest-smoke"]
@@ -155,6 +155,7 @@ ACTION_INFO = {
     "restart": ("Restart", "Recreate the stack from the current configuration."),
     "profile": ("Apply profile", "Write a profile preset (lightweight/development/performance) to .env."),
     "resize": ("Resize", "Change CPU/RAM (and disk for Windows) in .env; restart to apply."),
+    "trace": ("Trace functions", "Trace a lab target's functions with frida-trace and save a JSON call map and annotated session log."),
     "setup": ("Install dependencies", "Install the host prerequisites for this lab."),
     "backup": ("Backup", "Write a guest backup archive into the lab's backups/ folder."),
     "service-install": ("Install boot service", "Start this lab automatically at boot (systemd)."),
@@ -188,6 +189,11 @@ PRIVILEGED = {"setup", "service-install", "service-uninstall"}
 SECRET_PARTS = ("PASSWORD", "SECRET", "TOKEN", "API_KEY", "PRIVATE_KEY", "CREDENTIAL")
 ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+SAFE_GLOB = re.compile(r"^[A-Za-z0-9_.*?!:\[\]+\- ]{1,160}$")
+FORBIDDEN_TRACE_TARGETS = frozenset({
+    "init", "systemd", "sshd", "launchd", "kernel_task",
+    "csrss.exe", "lsass.exe", "wininit.exe", "services.exe", "smss.exe",
+})
 SIZE = re.compile(r"^[1-9][0-9]{0,5}[MmGgTt]?$")
 
 
@@ -838,6 +844,44 @@ def macos_windows() -> dict:
     return {"available": True, "reason": None, "screenRecording": any(w["title"] for w in windows), "windows": windows}
 
 
+# Each system prompt is asked for at most once per console process: macOS itself shows it only
+# once per app, and asking again would only reopen Settings behind the user's back.
+_MACOS_ASKED: set[str] = set()
+
+
+def _screen_capture_access(request: bool) -> bool | None:
+    """CGPreflightScreenCaptureAccess, or CGRequestScreenCaptureAccess (which shows the system
+    "allow screen recording" prompt for the app macOS holds responsible for this console).
+    None when the call is unavailable."""
+    if host_os() != "macos":
+        return None
+    try:
+        cg = ctypes.CDLL("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+        fn = cg.CGRequestScreenCaptureAccess if request else cg.CGPreflightScreenCaptureAccess
+        fn.restype = ctypes.c_bool
+        fn.argtypes = []
+        return bool(fn())
+    except (OSError, AttributeError):
+        return None
+
+
+def macos_auto_request(root: str | None, pane: str) -> bool:
+    """Ask macOS once for a missing permission, without opening Settings: the Screen Recording
+    prompt via CoreGraphics, the Accessibility prompt via the helper. True when a prompt was asked."""
+    if host_os() != "macos" or pane in _MACOS_ASKED:
+        return False
+    _MACOS_ASKED.add(pane)
+    if pane == "screen-recording":
+        asked = _screen_capture_access(request=True) is not None
+    elif pane == "accessibility" and root and _ax_helper(root):
+        asked = _capture([_ax_helper(root), "request-access"], timeout=20)[0] == 0
+    else:
+        asked = False
+    if asked:
+        _macos_audit(root, "permission-request", detail={"pane": pane, "auto": True})
+    return asked
+
+
 def macos_window_screenshot(window_id: int) -> bytes:
     """A PNG of one on-screen window. Raises PlanError when the id is stale or Screen Recording is missing."""
     if host_os() != "macos":
@@ -853,6 +897,11 @@ def macos_window_screenshot(window_id: int) -> bytes:
         with open(path, "rb") as f:
             png = f.read()
         if code != 0 or not png.startswith(b"\x89PNG"):
+            if _screen_capture_access(request=False) is False:
+                macos_auto_request(None, "screen-recording")
+                raise PlanError(f"Screen Recording is needed to capture windows. macOS has asked; allow "
+                                f"{macos_responsible_app() or 'the console'}, restart the console and retry.",
+                                code="PERMISSION_REQUIRED")
             raise PlanError("Could not capture that window. If this keeps failing, grant Screen Recording "
                             "to the console (System Settings > Privacy & Security) and retry.")
         return png
@@ -1523,7 +1572,16 @@ def macos_permissions(root: str) -> dict:
                 trusted = bool(json.loads(output).get("trusted"))
             except ValueError:
                 trusted = None
-    recording = macos_windows().get("screenRecording") if host_os() == "macos" else None
+    recording = None
+    if host_os() == "macos":
+        recording = _screen_capture_access(request=False)
+        if recording is None:  # no preflight call: fall back to the window-title hint
+            recording = macos_windows().get("screenRecording")
+        # Missing grants are asked for once, automatically, instead of waiting for a click.
+        if recording is False:
+            macos_auto_request(root, "screen-recording")
+        if trusted is False:
+            macos_auto_request(root, "accessibility")
     return {"accessibility": {"granted": trusted,
                               "grantTo": named,
                               "hint": None if trusted else f"Enable {named} in System Settings > Privacy & Security > Accessibility"},
@@ -1542,6 +1600,9 @@ def macos_request_access(root: str, data: dict) -> dict:
     if pane not in _MACOS_PANES:
         raise PlanError("pane must be accessibility or screen-recording", code="INVALID_ARGS")
     prompted: bool | None = None
+    if pane == "screen-recording":
+        _MACOS_ASKED.add(pane)
+        prompted = _screen_capture_access(request=True)
     if pane == "accessibility" and _ax_helper(root):
         code, output = _capture([_ax_helper(root), "request-access"], timeout=20)
         if code == 0 and output.strip().startswith("{"):
@@ -2201,7 +2262,7 @@ def actions_for(lab: str, provider: str | None) -> list[dict]:
     elif provider == "native-rust":
         names = ["status", "doctor", "setup", "start", "stop"]
     elif provider:
-        names = [a for a in LABCTL_ACTIONS if not (a == "backup" and lab == "android")]
+        names = [a for a in LABCTL_ACTIONS if not (a == "backup" and lab == "android") and not (a == "trace" and lab != "android")]
         if provider == "macos-containers":
             names = [a for a in names if a not in PRIVILEGED]
     else:
@@ -2409,7 +2470,8 @@ def plan(root: str, request: dict, host: dict | None = None) -> dict:
         import source_control
         return source_control.plan(root, request)
     allowed = {"lab", "action", "profile", "cpus", "ram", "disk", "device", "wslDistro", "backup",
-               "clickPid", "clickX", "clickY", "inputKind", "inputText", "inputKey",
+               "clickPid", "clickX", "clickY", "target", "glob",
+               "inputKind", "inputText", "inputKey",
                "elementId", "elementKind", "elementSession", "elementBundle",
                "elementPid", "elementPath", "elementIdentity", "axAction", "elementValue", "elementWindowId",
                "scrollDirection", "scrollPages"}
@@ -2457,6 +2519,11 @@ def plan(root: str, request: dict, host: dict | None = None) -> dict:
             except (TypeError, ValueError):
                 raise PlanError(f"click{name.capitalize()} must be a screen coordinate") from None
             click[name] = int(value)
+
+    for key in ("target", "glob"):
+        if request.get(key) not in (None, "") and action != "trace":
+            raise PlanError("Trace parameters are only accepted by trace")
+
     scroll_values: dict = {}
     if any(request.get(k) not in (None, "") for k in ("scrollDirection", "scrollPages")) and action != "macos-scroll":
         raise PlanError("Scroll parameters are only accepted by the app mirror scroll action")
@@ -2534,6 +2601,7 @@ def plan(root: str, request: dict, host: dict | None = None) -> dict:
                 raise PlanError("axAction must be an advertised AX action name (e.g. AXPress)",
                                 code="INVALID_ARGS", retry="never")
             ax_values["action"] = ax_action
+
     if request.get("backup"):
         raise PlanError("Restore is not available from the web console; use the lab's scripts/restore.sh")
 
@@ -2690,6 +2758,32 @@ def plan(root: str, request: dict, host: dict | None = None) -> dict:
                 if len(args) == 3:
                     raise PlanError("Choose a resource to resize")
                 effects.append("Writes resource configuration to .env. Restart to apply; guest disks only grow.")
+            elif action == "trace":
+                args.append("trace")
+                trace_target = request.get("target")
+                if trace_target not in (None, ""):
+                    if (
+                        not isinstance(trace_target, str)
+                        or not SAFE_NAME.match(trace_target)
+                        or trace_target.startswith("-")
+                        or ".." in trace_target
+                        or trace_target.lower() in FORBIDDEN_TRACE_TARGETS
+                        or (trace_target.isdigit() and int(trace_target) <= 1)
+                    ):
+                        raise PlanError("Invalid trace target")
+                    args += ["--target", trace_target]
+                trace_glob = request.get("glob")
+                if trace_glob not in (None, ""):
+                    if (
+                        not isinstance(trace_glob, str)
+                        or not trace_glob.strip()
+                        or ".." in trace_glob
+                        or not SAFE_GLOB.match(trace_glob)
+                        or (trace_glob.startswith("-") and not trace_glob.startswith("-["))
+                    ):
+                        raise PlanError("Invalid symbol glob")
+                    args += ["--include", trace_glob]
+                effects.append("Traces target functions via frida-trace and saves a JSON call map and annotated session log in artifacts/traces/.")
             else:
                 args.append(action)
             if profile:
@@ -3057,3 +3151,28 @@ def monitor(root: str, lab: str, host: dict | None = None) -> dict:
             for n in names]
     overall = "running" if running and len(running) == len(rows) else "partial" if running else "stopped"
     return {"lab": lab, "state": overall, "runtime": runtime, "containers": rows, "checkedAt": time.time()}
+
+
+def dropper_audit(root: str, target: str | None = None, rehearse: bool = False) -> dict:
+    """Run the PENT-15 two-stage 'clean dropper' detector on a scoped path under root."""
+    rel_target = target if target is not None else os.path.join("scripts", "analysis", "dropper_lab")
+    real_root = os.path.realpath(root)
+    scoped_target = _scoped(root, rel_target)
+    if not os.path.exists(scoped_target):
+        raise PlanError("Dropper analysis target does not exist: " + rel_target)
+    if os.path.islink(os.path.join(root, rel_target)):
+        raise PlanError("Symlink targets are not allowed in dropper_audit: " + rel_target)
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    from scripts.analysis import dropper_detect
+
+    try:
+        report = dropper_detect.scan_path(scoped_target, scope_root=real_root)
+    except ValueError as exc:
+        raise PlanError(str(exc)) from exc
+    if rehearse:
+        from scripts.analysis.dropper_lab.stage2_server import run_lab_rehearsal
+
+        report["rehearsal"] = run_lab_rehearsal(allow_exec=True)
+    return report
+

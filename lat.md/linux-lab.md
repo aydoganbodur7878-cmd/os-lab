@@ -36,6 +36,33 @@ expected, network containment is documented in
 [[linux-lab/knowledge/networking.md]] and worked workflows in
 [[linux-lab/knowledge/usecases.md]].
 
+## Server first-look diagnostics (OS-16)
+
+[[linux-lab/scripts/server_firstlook.py]] reports Linux guest facts without
+changing the system or requiring sudo.
+
+It runs fixed argument lists for uname, lsb_release, inxi (CPU only),
+free, local df and systemctl service listing, with locale-independent parsing and
+per-command timeouts. Each subprocess call has literal arguments and disables
+the shell; unknown command names are rejected. It needs only Python's standard
+library and no sudo.
+
+Readable text and JSON expose kernel/architecture, distro, CPU, memory bytes,
+local mount usage and loaded service states. An architecture note distinguishes
+kernel names from distribution package names. Missing tools, failed commands,
+unrecognized output and timeouts stay explicit; unavailable service data is null,
+not an empty healthy list. Exit 0 means report generation, not a health verdict.
+Empty or unknown service states and malformed distro/CPU fields produce partial
+reports. Zero-sized disks may have null usage percentages. ASCII-only stdout
+uses character escapes; JSON preserves the original values on decoding.
+Nothing is installed, changed, automatically saved or sent over the network.
+
+[[android-lab/lab/tests/test_server_firstlook.py]] covers normal output, missing
+tools, timeouts, malformed tables, failed/non-systemd services, empty/unknown
+service states, distro/CPU validation, zero-sized disks, ASCII stdout, fixed
+command execution, JSON and CLI errors.
+[[linux-lab/docs/OS-16/VERIFY.md]] describes lab reproduction and evidence capture.
+
 ## Permission and ownership audit
 
 [[linux-lab/scripts/permission_audit.py]] audits an owned lab tree's Unix modes
@@ -143,3 +170,18 @@ Validation and install steps, in order:
 
 Only install trusted `.deb` packages. Installation requires sudo
 permissions and may modify the operating system.
+
+## OS-23 salt okunur dpkg envanteri
+
+[[linux-lab/scripts/dpkg_inventory.py]], paket listesini, paket dosyalarını ve
+tam yoldan dosya sahipliğini sürümlü JSON olarak sunar.
+
+Paket durumu ile kurulu paket sayısı ayrı tutulur. Mimari ekleri korunur;
+dpkg arama jokerleri kaçırılır ve sonuç tam yolla karşılaştırılır. Araç sembolik
+bağlantıları çözmez, paketleri değiştirmez, root veya ağ erişimi istemez.
+Alternatif yönetim veritabanı, kopyalar ve sentetik testler için kullanılabilir.
+
+[[linux-lab/tests/test_dpkg_inventory.py]], komut hataları, girdi doğrulama
+ve ayrıştırma davranışlarını çevrimdışı sınar. dpkg varsa geçici sentetik
+veritabanında gerçek komutla bütünleşme testi de çalışır. Canlı Ubuntu
+kanıtıyla sentetik testlerin ayrımı [[linux-lab/os-23/VERIFY.md]] içinde açıklanır.

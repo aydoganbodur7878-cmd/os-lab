@@ -13,9 +13,12 @@ Node server at runtime.
 availability pills), Spotlight and theme ported from qLar.
 [[dashboard/src/shell/lab-switcher.tsx]] is the ⌘L / Ctrl+L modal that sets the
 focused lab: a compact card per lab with its live availability, remembered in
-[[dashboard/src/shell/active-lab.ts]]. With a focus, the sidebar's OS Lab group
-keeps only that lab's entry (plus the firewall section); "All labs" in the
-switcher restores the full list, and Spotlight keeps every lab listed.
+[[dashboard/src/shell/active-lab.ts]]. Firewall Lab is one of those labs. With a
+focus, the sidebar replaces the OS Lab group with a group named after the lab
+that lists its nav items; "All labs" in the switcher restores the full OS Lab
+list, and Spotlight keeps every lab listed. The Help group is collapsible,
+closed by default, opens itself when the current page is inside it, and
+remembers the choice in localStorage.
 Pages are React
 islands: [[dashboard/src/views/host-page.tsx]],
 [[dashboard/src/views/lab-page.tsx]], [[dashboard/src/views/jobs-page.tsx]],
@@ -143,7 +146,14 @@ and monitor stats) and a Settings tab, with the detail tabs keeping their
 routes ([[dashboard/src/views/cleanup/pages.tsx]]).
 
 Settings hosts bookmarks, permissions, the monitor configuration, widgets and
-the tools hub. The public route explains that the engine is local, while the
+the tools hub, and is the last item in the Cleanup Lab nav and tab strip.
+
+In the sidebar, Dashboard, Advanced scan, Results and Settings are collapsible
+groups, closed until their page is open. Each lists an Overview entry plus one
+sub-nav per card, such as Storage, Plan & confirm or Desktop widgets. A
+sub-nav link (`/cleanup/<page>/#<section>`) loads the page, scrolls to that
+card once its data is in and outlines it for a few seconds. Spaces, Leftovers,
+History and Relocation have a single card and no group. The public route explains that the engine is local, while the
 local app uses typed cleanup jobs and a confirm step.
 
 [[dashboard/src/views/source/pages.tsx]] provides localized Source Lab routes and
