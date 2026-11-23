@@ -185,3 +185,9 @@ Alternatif yönetim veritabanı, kopyalar ve sentetik testler için kullanılabi
 ve ayrıştırma davranışlarını çevrimdışı sınar. dpkg varsa geçici sentetik
 veritabanında gerçek komutla bütünleşme testi de çalışır. Canlı Ubuntu
 kanıtıyla sentetik testlerin ayrımı [[linux-lab/os-23/VERIFY.md]] içinde açıklanır.
+
+## OS-29 Log Viewer
+
+[[linux-lab/scripts/log-viewer.sh]] is a menu helper that shows the first or last lines of a log, follows it, counts lines, pages through it and searches it.
+
+Log text is treated as untrusted: terminal control bytes are stripped before display. Missing or unreadable files stop with a message, end of input leaves the menu, and without a file argument it falls back to `journalctl` when `/var/log/syslog` is absent. [[linux-lab/tests/test_log_viewer.py]] covers these cases with temporary files.
